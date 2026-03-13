@@ -1,0 +1,37 @@
+INSTRUCCIONES RÁPIDAS DE SETUP
+================================
+
+1. CREAR EL VIRTUAL ENVIRONMENT (YA HECHO)
+   El archivo venv/ ya fue creado.
+
+2. ACTIVAR EL VIRTUAL ENVIRONMENT
+
+   Windows (PowerShell):
+   .\venv\Scripts\Activate.ps1
+
+   Windows (CMD):
+   .\venv\Scripts\activate.bat
+
+   macOS/Linux:
+   source venv/bin/activate
+
+3. INSTALAR DEPENDENCIAS (YA HECHO)
+   Las dependencias ya están instaladas en el venv.
+   
+   Para instalar manuales:
+   pip install -r requirements.txt
+
+4. CONFIGURAR BOT
+
+   Edita el archivo .env y agrega tu BOT_TOKEN:
+   BOT_TOKEN=TU_TOKEN_AQUI
+
+5. EJECUTAR EL BOT
+
+   python main.py
+
+   O si el venv no está activado:
+   .\venv\Scripts\python.exe main.py
+
+NOTA: VS Code está configurado para usar automáticamente el venv.
+Si los imports siguen fallando, reinicia VS Code.
