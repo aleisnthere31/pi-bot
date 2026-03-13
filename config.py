@@ -16,6 +16,13 @@ from dotenv import load_dotenv
 # CARGA DE VARIABLES DE ENTORNO
 load_dotenv()
 
+# Importar funciones de base de datos
+try:
+    from database import init_db
+except ImportError:
+    def init_db():
+        pass  # Fallback si database.py no está disponible
+
 # ===================================================================================
 # TOKENS Y AUTENTICACION
 # ===================================================================================
@@ -47,7 +54,7 @@ CHAT_IDS = {
     "theme_escuela": int(os.getenv("THEME_ESCUELA", 28809)),
     
     # Tema de juegos y apuestas (IMPORTANTE: restricciones especiales)
-    "theme_juegosYcasino": int(os.getenv("THEME_JUEGOS_CASINO", 6791)),
+    "theme_juegosYcasino": int(os.getenv("THEME_JUEGOS_CASINO", 528)),
     
     # Otros temas
     "theme_relatos": int(os.getenv("THEME_RELATOS", 50746)),
@@ -85,6 +92,7 @@ def validate_config():
     Valida que todas las configuraciones necesarias sean validas.
     
     Cambios: Se agrego esta funcion para validacion temprana de errores.
+             Se agregó inicialización de base de datos PostgreSQL.
     """
     if BOT_TOKEN == "your_token_here":
         raise ValueError(
@@ -106,6 +114,12 @@ def validate_config():
     
     if BAN_TIME <= 0:
         raise ValueError("ERROR: BAN_TIME debe ser mayor a 0")
+    
+    # Inicializar base de datos
+    try:
+        init_db()
+    except Exception as e:
+        raise ValueError(f"ERROR: No se pudo conectar a la base de datos: {e}")
 
 # Ejecutar validacion al importar el modulo
 try:

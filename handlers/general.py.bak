@@ -1,0 +1,358 @@
+"""
+💰 HANDLERS GENERALES - SISTEMA DE ECONOMÍA
+=============================================
+Contiene todos los comandos relacionados con el sistema de PiPesos.
+Usa PostgreSQL (SQLAlchemy) en lugar de JSON.
+
+CAMBIOS PRINCIPALES:
+✅ Migración de JSON a PostgreSQL
+✅ Uso de SQLAlchemy ORM
+✅ Mejor rendimiento y escalabilidad
+✅ Transacciones ACID
+✅ Logging detallado
+"""
+
+import random
+import logging
+from telegram import Update
+from telegram.ext import ContextTypes
+from database import SessionLocal, get_usuario_o_crear, transferir_puntos, agregar_puntos, quitar_puntos
+
+try:
+    from config import CHAT_IDS
+except ImportError:
+    from ..config import CHAT_IDS
+
+# ===================================================================================
+# 📝 LOGGING
+# ===================================================================================
+logger = logging.getLogger(__name__)
+
+
+# ===================================================================================
+# 🔧 FUNCIONES AUXILIARES
+# ===================================================================================
+
+async def verificar_admin(id_usuario: int, update: Update) -> bool:
+    """
+    Verifica si un usuario es administrador del chat actual.
+    
+    Args:
+        id_usuario (int): ID del usuario a verificar
+        update (Update): Evento de Telegram
+        
+    Returns:
+        bool: True si es admin, False si no
+    """
+    try:
+        chat_id = update.effective_chat.id
+        admins = await update.effective_chat.get_administrators()
+
+        for admin in admins:
+            if admin.user.id == id_usuario:
+                logger.debug(f"Usuario {id_usuario} es admin en chat {chat_id}")
+                return True
+
+        logger.debug(f"Usuario {id_usuario} NO es admin en chat {chat_id}")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error verificando admin: {e}")
+        return False
+
+
+# ===================================================================================
+# 📋 COMANDOS
+# ===================================================================================
+
+
+async def ver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    🎯 COMANDO: /ver
+    
+    Muestra el saldo actual del usuario en PiPesos.
+    Si no existe, lo registra con saldo 0.
+    """
+    if not update.message or not update.effective_user:
+        return
+
+    user = update.effective_user
+    username = user.username or user.first_name
+    saldo = existe_usuario(user.id)
+
+    if saldo is False:
+        # Registrar usuario nuevo con saldo 0
+        agregar_usuario(user.id, 0, username)
+        saldo = 0
+        logger.info(f"Nuevo usuario registrado: {username} ({user.id})")
+
+    await update.message.reply_text(f"💰 {username}, tienes {saldo} PiPesos.")
+
+
+async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    🎯 COMANDO: /regalar <cantidad> [@usuario]
+    
+    Solo admins. Regala PiPesos a un usuario.
+    
+    Cambio: Uso de función auxiliar _buscar_usuario()
+    """
+    if not update.message or not update.effective_user:
+        return
+
+    sender = update.effective_user
+
+    # 🔐 Verificar admin
+    if not await verificar_admin(sender.id, update):
+        await update.message.reply_text("⚠️ Solo los administradores pueden usar este comando.")
+        logger.info(f"{sender.username} intentó /regalar sin ser admin")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /regalar <cantidad> [@usuario] o respondiendo a un mensaje."
+        )
+        return
+
+    try:
+        cantidad = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ La cantidad debe ser un número.")
+        return
+
+    if cantidad <= 0:
+        await update.message.reply_text("⚠️ La cantidad debe ser mayor a 0.")
+        return
+
+    receptor = None
+
+    if len(context.args) >= 2:
+        # Buscar por mención
+        receptor = _buscar_usuario(context.args[1])
+
+    elif update.message.reply_to_message:
+        # Buscar por reply
+        receptor = update.message.reply_to_message.from_user
+
+    if not receptor:
+        await update.message.reply_text("⚠️ No se encontró al usuario receptor.")
+        return
+
+    dar_puntos(receptor.id, receptor.username or receptor.first_name, cantidad)
+
+    await update.message.reply_text(
+        f"🎁 @{sender.username or sender.first_name} regaló {cantidad} PiPesos a "
+        f"@{receptor.username or receptor.first_name}"
+    )
+
+
+async def dar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    🎯 COMANDO: /dar <cantidad> [@usuario]
+    
+    Transfiere PiPesos a otro usuario si tienes saldo suficiente.
+    
+    Cambio: Uso de función auxiliar _buscar_usuario()
+    """
+    if not update.message or not update.effective_user:
+        return
+
+    sender = update.effective_user
+
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /dar <cantidad> [@usuario] o respondiendo a un mensaje."
+        )
+        return
+
+    try:
+        cantidad = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ La cantidad debe ser un número.")
+        return
+
+    if cantidad <= 0:
+        await update.message.reply_text("⚠️ La cantidad debe ser mayor a 0.")
+        return
+
+    receptor = None
+
+    if len(context.args) >= 2:
+        # Buscar por mención
+        receptor = _buscar_usuario(context.args[1])
+
+    elif update.message.reply_to_message:
+        # Buscar por reply
+        receptor = update.message.reply_to_message.from_user
+
+    if not receptor:
+        await update.message.reply_text("⚠️ No se encontró al usuario receptor.")
+        return
+
+    # Verificar saldo del emisor
+    usuarios = cargar_usuarios()
+    sender_id_str = str(sender.id)
+
+    if sender_id_str not in usuarios:
+        usuarios[sender_id_str] = {"username": sender.username or sender.first_name, "saldo": 0}
+
+    if usuarios[sender_id_str]["saldo"] < cantidad:
+        await update.message.reply_text(
+            f"💸 Saldo insuficiente. Tienes {usuarios[sender_id_str]['saldo']} PiPesos."
+        )
+        return
+
+    # Ejecutar transferencia
+    quitar_puntos(sender.id, sender.username or sender.first_name, cantidad)
+    dar_puntos(receptor.id, receptor.username or receptor.first_name, cantidad)
+
+    await update.message.reply_text(
+        f"🤝 @{sender.username or sender.first_name} dio {cantidad} PiPesos a "
+        f"@{receptor.username or receptor.first_name}"
+    )
+
+
+async def numero_azar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    🎯 COMANDO: /NumAzar <N1> <N2>
+    
+    Genera un número aleatorio entre N1 y N2.
+    Útil para juegos y sorteos.
+    """
+    if not update.message:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Uso: /NumAzar N1 N2\nEjemplo: /NumAzar 5 15",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    try:
+        n1 = int(context.args[0])
+        n2 = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Los parámetros deben ser números enteros.",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    # Asegurar que n1 < n2
+    if n1 > n2:
+        n1, n2 = n2, n1
+
+    resultado = random.randint(n1, n2)
+
+    await update.message.reply_text(
+        f"🎲 Número al azar entre {n1} y {n2}: **{resultado}**",
+        parse_mode="Markdown",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+async def quitar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    🎯 COMANDO: /quitar <cantidad> [@usuario]
+    
+    Solo admins. Quita PiPesos a un usuario.
+    
+    Cambio: Uso de función auxiliar _buscar_usuario()
+    """
+    if not update.message or not update.effective_user:
+        return
+
+    sender = update.effective_user
+
+    # Verificar que quien lo ejecuta es admin
+    if not await verificar_admin(sender.id, update):
+        await update.message.reply_text("⚠️ Solo los administradores pueden usar este comando.")
+        logger.info(f"{sender.username} intentó /quitar sin ser admin")
+        return
+
+    # Verificar que haya al menos un argumento (cantidad)
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /quitar <cantidad> [@usuario] o responder a un mensaje")
+        return
+
+    # Intentar convertir la cantidad
+    try:
+        cantidad = int(context.args[0])
+        if cantidad <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ La cantidad debe ser un número mayor que 0.")
+        return
+
+    receptor = None
+
+    if len(context.args) >= 2:
+        # Buscar por mención
+        receptor = _buscar_usuario(context.args[1])
+
+        if receptor is None:
+            await update.message.reply_text(
+                f"⚠️ No se encontró ningún usuario con el nombre @{context.args[1]}."
+            )
+            return
+
+    elif update.message.reply_to_message:
+        # Buscar por reply
+        receptor = update.message.reply_to_message.from_user
+
+    else:
+        await update.message.reply_text("⚠️ Debes responder a un mensaje o mencionar a un usuario.")
+        return
+
+    # Quitar puntos
+    quitar_puntos(receptor.id, receptor.username or receptor.first_name, cantidad)
+
+    await update.message.reply_text(f"✅ Se han quitado {cantidad} PiPesos a @{receptor.username}.")
+
+
+async def confesar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    🎯 COMANDO: /confesar [texto]
+    
+    Envía una confesión anónima al tema de confesiones.
+    Solo funciona en privado con el bot.
+    """
+    if not update.message:
+        return
+
+    user = update.effective_user
+
+    # Verificar que es privado
+    if update.message.chat.type != "private":
+        await update.message.reply_text("⚠️ Este comando solo funciona en privado con el bot.")
+        logger.info(f"{user.username} intentó /confesar en grupo")
+        return
+
+    # Obtener el texto de la confesión
+    if not context.args:
+        await update.message.reply_text(
+            "✍️ Escribe tu confesión después del comando.\n"
+            "Ejemplo: /confesar Me gusta cantar en la ducha 🎶"
+        )
+        return
+
+    confesion = " ".join(context.args)
+
+    try:
+        # Enviar al grupo de confesiones de forma anónima
+        await context.bot.send_message(
+            chat_id=CHAT_IDS["confesiones"],
+            message_thread_id=CHAT_IDS["confesiones_topic"],
+            text=f"📢 Confesión anónima:\n\n{confesion}",
+        )
+
+        # Confirmar al usuario en privado
+        await update.message.reply_text("✅ Tu confesión ha sido enviada de manera anónima.")
+        logger.info(f"Confesión enviada por {user.username} ({user.id})")
+
+    except Exception as e:
+        logger.error(f"Error al enviar confesión: {e}")
+        await update.message.reply_text(
+            "❌ Error al enviar la confesión. Contacta con un administrador."
+        )
